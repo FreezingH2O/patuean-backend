@@ -15,6 +15,7 @@ threshold, then report P(spoof) as 0..100 (higher = more likely fake):
 """
 
 import hashlib
+import logging
 import math
 
 import httpx
@@ -22,6 +23,9 @@ import httpx
 from app.config import get_settings
 
 settings = get_settings()
+
+# Attach to uvicorn's logger so raw-score lines show up in the server console.
+logger = logging.getLogger("uvicorn.error")
 
 # Calibration of the anti-spoof logit (provided by the model owner).
 SPOOF_THRESHOLD = 6.19   # score above this = real (bona_fide); below = fake (spoof)
@@ -51,14 +55,23 @@ async def _call_real(wav_bytes: bytes) -> float:
         resp.raise_for_status()
         data = resp.json()
     if "score" in data and data["score"] is not None:
-        return score_to_spoof_prob(float(data["score"]))
+        raw_score = float(data["score"])
+        spoof_prob = score_to_spoof_prob(raw_score)
+        logger.info(
+            "anti-spoof raw score=%.4f prediction=%s -> spoofProb=%.1f (threshold=%.2f)",
+            raw_score, data.get("prediction"), spoof_prob, SPOOF_THRESHOLD,
+        )
+        return spoof_prob
     # Fallback if score is absent: use the boolean verdict.
+    logger.info("anti-spoof raw score absent; using is_bona_fide=%s", data.get("is_bona_fide"))
     return 5.0 if data.get("is_bona_fide") else 95.0
 
 
 def _stub(audio_bytes: bytes) -> float:
     h = int(hashlib.sha256(audio_bytes).hexdigest(), 16)
-    return round((h % 10000) / 100, 1)
+    spoof_prob = round((h % 10000) / 100, 1)
+    logger.info("anti-spoof stub (no ANTISPOOF_API_URL): synthesized spoofProb=%.1f", spoof_prob)
+    return spoof_prob
 
 
 async def spoof_probability(wav_bytes: bytes) -> float:
